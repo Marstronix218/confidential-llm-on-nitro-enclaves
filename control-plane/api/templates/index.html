@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin Panel</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background-color: white;
+    }
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 20px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    h1 {
+      font-size: 24px;
+      margin-bottom: 40px;
+    }
+    .management-section {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 40px;
+      gap: 40px;
+    }
+    .section {
+      flex: 1;
+    }
+    h2 {
+      font-size: 20px;
+      margin-bottom: 20px;
+    }
+    .status-line {
+      margin-bottom: 20px;
+    }
+    .button-group {
+      display: flex;
+      gap: 10px;
+    }
+    button {
+      padding: 10px 30px;
+      font-size: 16px;
+      border: 1px solid #ccc;
+      background-color: white;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #f5f5f5;
+    }
+    button:disabled {
+      background-color: #f5f5f5;
+      cursor: not-allowed;
+    }
+    .status-active {
+      color: green;
+    }
+    .status-inactive {
+      color: red;
+    }
+    .data-plane {
+      margin-top: 40px;
+    }
+    .redirect-link {
+      margin-top: 10px;
+      margin-bottom: 20px;
+    }
+    .redirect-link a {
+      color: blue;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+    .data-plane-management {
+      margin-bottom: 40px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid #eee;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Admin Panel</h1>
+
+    <div class="data-plane-management">
+      <h2>Data Plane</h2>
+      <div class="status-line">
+        Instance:
+        <span id="instanceCreatedText" class="status-inactive">Not created</span>
+      </div>
+      <div class="button-group">
+        <button onclick="createDataPlane()" id="createDataPlaneBtn">Create</button>
+        <button onclick="deleteDataPlane()" id="deleteDataPlaneBtn">Terminate</button>
+      </div>
+    </div>
+
+    <div class="management-section">
+      <div class="section">
+        <h2>Instance</h2>
+        <div class="status-line">
+          State:
+          <span id="instanceStatusText" class="status-inactive">Stopped</span>
+        </div>
+        <div class="button-group">
+          <button onclick="controlInstance('start')" id="startInstanceBtn">Start</button>
+          <button onclick="controlInstance('stop')" id="stopInstanceBtn">Stop</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Enclave (TEE)</h2>
+        <div class="status-line">
+          State:
+          <span id="teeStatusText" class="status-inactive">Stopped</span>
+        </div>
+        <div class="button-group">
+          <button onclick="controlTEE('start')" id="startTEEBtn">Start</button>
+          <button onclick="controlTEE('stop')" id="stopTEEBtn">Stop</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="data-plane">
+      <h2>Demo</h2>
+      <div class="status-line">
+        State:
+        <span id="demoStatusText" class="status-inactive">Stopped</span>
+      </div>
+      <div class="button-group">
+        <button onclick="controlDemo('start')" id="startDemoBtn">Start</button>
+        <button onclick="controlDemo('stop')" id="stopDemoBtn">Stop</button>
+      </div>
+      <div class="redirect-link" id="redirectLink" style="display: none;">
+        <a href="#" target="_blank">&lt;demo link&gt;</a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function updateStatus() {
+      fetch('/api/status')
+        .then(response => response.json())
+        .then(data => {
+          // Data plane create/terminate
+          const instanceCreatedText = document.getElementById('instanceCreatedText');
+          instanceCreatedText.textContent = data.instance_created ? 'Created' : 'Not created';
+          instanceCreatedText.className = data.instance_created ? 'status-active' : 'status-inactive';
+          document.getElementById('createDataPlaneBtn').disabled = data.instance_created;
+          document.getElementById('deleteDataPlaneBtn').disabled = !data.instance_created;
+
+          // Instance start/stop
+          const instanceStatusText = document.getElementById('instanceStatusText');
+          instanceStatusText.textContent = data.instance_working ? 'Running' : 'Stopped';
+          instanceStatusText.className = data.instance_working ? 'status-active' : 'status-inactive';
+          document.getElementById('startInstanceBtn').disabled = data.instance_working;
+          document.getElementById('stopInstanceBtn').disabled = !data.instance_working;
+
+          // TEE
+          const teeStatusText = document.getElementById('teeStatusText');
+          teeStatusText.textContent = data.tee_status ? 'Running' : 'Stopped';
+          teeStatusText.className = data.tee_status ? 'status-active' : 'status-inactive';
+          document.getElementById('startTEEBtn').disabled = data.tee_status;
+          document.getElementById('stopTEEBtn').disabled = !data.tee_status;
+
+          // Demo
+          const demoStatusText = document.getElementById('demoStatusText');
+          demoStatusText.textContent = data.demo_running ? 'Running' : 'Stopped';
+          demoStatusText.className = data.demo_running ? 'status-active' : 'status-inactive';
+          document.getElementById('startDemoBtn').disabled = data.demo_running;
+          document.getElementById('stopDemoBtn').disabled = !data.demo_running;
+
+          const redirectLink = document.getElementById('redirectLink');
+          if (data.demo_running && data.demo_url) {
+            const linkElement = redirectLink.querySelector('a');
+            linkElement.href = data.demo_url;
+            linkElement.textContent = data.demo_url;
+            redirectLink.style.display = 'block';
+          } else {
+            redirectLink.style.display = 'none';
+          }
+        });
+    }
+
+    function controlInstance(action) {
+      fetch(`/api/instance/${action}`, { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+          if (!data.success) alert(data.message);
+          updateStatus();
+        });
+    }
+
+    function controlTEE(action) {
+      fetch(`/api/tee/${action}`, { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+          if (!data.success) alert(data.message);
+          updateStatus();
+        });
+    }
+
+    function controlDemo(action) {
+      if (action === 'start') {
+        // Check the enclave is ready before starting the demo
+        fetch('/api/tee/status')
+          .then(response => response.json())
+          .then(data => {
+            if (!data.ready) {
+              alert("The enclave is still starting. Please wait a moment.");
+            } else {
+              proceedDemoStart();
+            }
+          })
+          .catch(() => alert("Failed to check the enclave status."));
+      } else {
+        // Stop the demo
+        proceedDemoStop();
+      }
+    }
+
+    function proceedDemoStart() {
+      fetch('/api/demo/start', { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+          if (!data.success) {
+            alert(data.message || "Failed to start the demo");
+          }
+          updateStatus();
+        })
+        .catch(() => alert("Network error"));
+    }
+
+    function proceedDemoStop() {
+      fetch('/api/stop_demo', { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+          if (!(data.chat_stopped || data.react_stopped)) {
+            alert("Some processes may not have stopped");
+          }
+          updateStatus();
+        })
+        .catch(() => alert("Network error"));
+    }
+
+    function createDataPlane() {
+      if (confirm('Create the data-plane instance?')) {
+        fetch('/api/instance/create', { method: 'POST' })
+          .then(response => response.json())
+          .then(data => {
+            if (data.success) {
+              alert('Data-plane instance created');
+            } else {
+              alert(data.message || 'Failed to create the data-plane instance');
+            }
+          })
+          .catch(() => alert('Network error'));
+      }
+    }
+
+    function deleteDataPlane() {
+      if (confirm('Terminate the data-plane instance? This cannot be undone.')) {
+        fetch('/api/instance/delete', { method: 'POST' })
+          .then(response => response.json())
+          .then(data => {
+            if (data.success) {
+              alert('Data-plane instance terminated');
+            } else {
+              alert(data.message || 'Failed to terminate the data-plane instance');
+            }
+          })
+          .catch(() => alert('Network error'));
+      }
+    }
+
+    // Initial load and periodic refresh
+    updateStatus();
+    setInterval(updateStatus, 5000);
+  </script>
+</body>
+</html>

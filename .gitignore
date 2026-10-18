@@ -1,0 +1,33 @@
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Generated RSA keys (chat.py / vsock_client)
+keys/
+key/
+*.pem
+server_key.bin
+key_a_encrypted.bin
+
+# Model weights and enclave images (built locally, too large for git)
+enclave/model/
+*.eif
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Node
+node_modules/
+dist/
+bun.lockb
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

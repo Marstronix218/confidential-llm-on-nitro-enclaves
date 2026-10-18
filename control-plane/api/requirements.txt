@@ -1,0 +1,6 @@
+pycryptodome
+flask
+flask-cors
+requests
+boto3
+psutil

@@ -1,0 +1,55 @@
+# Local mock mode: the full chat flow with no AWS account.
+# The "enclave" is the real vsock_server.py running as a plain container over TCP,
+# so the key exchange and encryption are identical to the Nitro deployment —
+# only the hardware isolation and attestation are missing.
+#
+#   docker compose up --build      # first build downloads CPU torch + Qwen2.5-0.5B-Instruct (a few minutes)
+#   ENCLAVE_MODEL=distilgpt2 docker compose up --build   # original GPT-2 instead
+#   open http://localhost:8080
+#   python scripts/smoke_test.py   # or drive the whole flow from the CLI
+
+services:
+  enclave:
+    build:
+      context: ./enclave
+      dockerfile: Dockerfile.local
+      args:
+        # Any Hugging Face causal LM. Examples: Qwen/Qwen2.5-0.5B-Instruct (default), distilgpt2, gpt2
+        MODEL_ID: ${ENCLAVE_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}
+    environment:
+      MAX_NEW_TOKENS: ${MAX_NEW_TOKENS:-150}
+    # not published: only the data plane may talk to the enclave, as with vsock
+
+  data-plane:
+    build: ./data-plane
+    environment:
+      ENCLAVE_TRANSPORT: tcp
+      ENCLAVE_HOST: enclave
+    depends_on:
+      - enclave
+    # not published: the control plane reaches it on the compose network
+
+  chat:
+    build: ./control-plane/api
+    environment:
+      DATA_PLANE_URL: http://data-plane:5000
+      KEY_DIRECTORY: /data/keys
+      TEE_TIMEOUT: "180"
+    volumes:
+      - keys:/data
+    ports:
+      - "8501:8501"
+    depends_on:
+      - data-plane
+
+  web:
+    build: ./control-plane/web
+    environment:
+      VITE_API_BASE_URL: http://localhost:8501/api   # used by the browser, so localhost is correct
+    ports:
+      - "8080:8080"
+    depends_on:
+      - chat
+
+volumes:
+  keys:

@@ -1,0 +1,7 @@
+-f https://download.pytorch.org/whl/cpu
+--index-url https://pypi.org/simple
+
+torch
+transformers[torch]
+pycryptodome
+
