@@ -235,3 +235,7 @@ What it does not protect against, and what I would change next:
 ## Tech stack
 
 Python · Flask · PyTorch · Hugging Face Transformers · PyCryptodome · AWS Nitro Enclaves · EC2 · SSM · KMS · boto3 · React · TypeScript · Vite · Tailwind · shadcn/ui · Docker Compose
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
