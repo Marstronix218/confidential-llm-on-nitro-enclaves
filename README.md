@@ -6,8 +6,6 @@ Default model: [Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-
 
 ![Demo: key exchange in the side panel, then an encrypted question and answer](docs/demo.gif)
 
-> Built during an internship at EAGLYS Inc. as part of a team, then cleaned up and extended for this repository. See [Credits & my contributions](#credits--my-contributions).
-
 **Contents:** [The problem](#the-problem-this-solves) · [How it works](#how-it-works-in-one-minute) · [Architecture](#architecture) · [Keys](#the-keys-and-who-holds-them) · [Run locally](#run-it-locally-no-aws-needed) · [Deploy on AWS](#deploy-on-aws) · [Model](#model) · [Security & limitations](#security-model-and-known-limitations) · [Glossary](#glossary)
 
 ## The problem this solves
@@ -237,25 +235,3 @@ What it does not protect against, and what I would change next:
 ## Tech stack
 
 Python · Flask · PyTorch · Hugging Face Transformers · PyCryptodome · AWS Nitro Enclaves · EC2 · SSM · KMS · boto3 · React · TypeScript · Vite · Tailwind · shadcn/ui · Docker Compose
-
-## Credits & my contributions
-
-This project was developed at **EAGLYS Inc.** and is published with their permission.
-
-- Original GPT-2-on-TEE enclave prototype: Kenta Adachi and the EAGLYS team.
-- vsock client/server and traffic forwarder: adapted from the AWS Nitro Enclaves samples (MIT-0; headers retained).
-- The React UI was scaffolded with Lovable.
-- Default model: [Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) (Apache-2.0), swapped in after the internship; the original prototype used GPT-2.
-
-**My contributions:**
-<!-- TODO: replace with what YOU built during the internship, e.g.:
-- Designed and built the control plane (admin.py) that creates the data-plane EC2 instance and drives the enclave lifecycle via SSM, plus the attestation-gated KMS key policy
-- Built the HTTP→vsock bridge (vsock_api_server.py) so the control plane can reach the enclave
-- Built the React chat UI with the key-exchange flow and encryption-step visualization
--->
-
-**Post-internship work in this repository:** restructured into a single repo, moved all AWS identifiers to configuration, added the Docker Compose local mode and smoke test, made the model configurable and switched the default to Qwen2.5-0.5B-Instruct, translated the UI and code to English.
-
-## License
-
-See [LICENSE](LICENSE) (Apache-2.0, inherited from the original `gpt-on-tee` repository). Files derived from AWS samples keep their MIT-0 headers.
