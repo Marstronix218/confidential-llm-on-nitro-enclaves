@@ -6,7 +6,7 @@ Default model: [Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-
 
 ![Demo: key exchange in the side panel, then an encrypted question and answer](docs/demo.gif)
 
-**Contents:** [The problem](#the-problem-this-solves) · [How it works](#how-it-works-in-one-minute) · [Architecture](#architecture) · [Keys](#the-keys-and-who-holds-them) · [Run locally](#run-it-locally-no-aws-needed) · [Deploy on AWS](#deploy-on-aws) · [Model](#model) · [Security & limitations](#security-model-and-known-limitations) · [Glossary](#glossary)
+**Contents:** [The problem](#the-problem-this-solves) · [How it works](#how-it-works-in-one-minute) · [Architecture](#architecture) · [Keys](#the-keys-and-who-holds-them) · [Run locally](#run-it-locally-no-aws-needed) · [Deploy on AWS](#deploy-on-aws) · [Model](#model) · [Security & limitations](#security-model-and-known-limitations) · [Roadmap](#roadmap) · [Glossary](#glossary)
 
 ## The problem this solves
 
@@ -157,14 +157,16 @@ To see that the host really only relays ciphertext, compare the logs: `docker co
 
 ## Deploy on AWS
 
-You need an AWS account. Nitro Enclaves require a supported instance type (for example `m5.xlarge` or larger) with the enclave option turned on.
+You need an AWS account. Nitro Enclaves require a supported instance type (for example `m5.xlarge` or larger) with the enclave option turned on. **[docs/aws-setup.md](docs/aws-setup.md)** covers the IAM policies, security groups, enclave sizing, a systemd unit and troubleshooting.
 
-### 1. Data plane: build the enclave image
+### 1. Data plane: build the enclave image and an AMI
+
+`admin.py` launches each data-plane instance from an AMI and only sends it commands over SSM, so build everything once on a template instance and save it as that AMI.
 
 On an Amazon Linux 2023 EC2 instance with Nitro Enclaves enabled:
 
 ```sh
-bash data-plane/scripts/ec2-setup.sh            # nitro-cli + docker groups (log out/in afterwards)
+bash data-plane/scripts/ec2-setup.sh            # nitro-cli, docker, 8 GiB enclave allocation (log out/in afterwards)
 python3 -m venv ~/venv && source ~/venv/bin/activate
 pip install -r enclave/requirements.txt -r data-plane/requirements.txt
 
@@ -173,6 +175,8 @@ python download_model.py                        # Qwen2.5-0.5B-Instruct; or: pyt
 docker build -t llm-enclave .
 nitro-cli build-enclave --docker-uri llm-enclave:latest --output-file llm.eif    # note PCR0-2
 ```
+
+Then create an AMI from this instance and put its ID in `DATA_PLANE_AMI_ID` ([details](docs/aws-setup.md#build-the-data-plane-ami)).
 
 ### 2. Control plane
 
@@ -220,6 +224,15 @@ What it does not protect against, and what I would change next:
 - **RSA in chunks** is slow and has no integrity protection across chunks. A hybrid RSA + AES-GCM scheme would fix both.
 - **Single-tenant global state.** `admin.py` tracks one data-plane instance in process memory.
 - `enclave/run.sh`, `traffic_forwarder.py` and `vsock-proxy.yaml` come from the AWS sample for outbound enclave networking. The model server does not currently use them.
+
+## Roadmap
+
+Beyond the fixes above, the longer-term direction is a managed service where customers get a ready-made, enclave-backed data plane to build on:
+
+- **Scalable data plane.** Run several data-plane instances behind a load balancer and scale them with demand, for example with EKS or EC2 Auto Scaling (a minimum of 2 instances, a maximum of 10).
+- **Authentication and roles** instead of IP allowlisting. For example, Amazon Cognito with three roles: *user* (chats), *tenant admin* (sets scaling limits for their organization) and *operator* (runs the whole service).
+- **Disposable infrastructure.** Data-plane instances are already created and deleted on demand. The next step is to bootstrap them from user data instead of a pre-built AMI.
+- **Swappable models and workloads.** Choosing the model at runtime, and eventually running any customer-supplied container image inside the enclave.
 
 ## Glossary
 
