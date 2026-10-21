@@ -1,0 +1,20 @@
+# One ignore file for every image: all build contexts are the repo root
+# (docker compose and `docker build -f enclave/Dockerfile .`), so each Dockerfile copies common/utils.py.
+.git
+.omc
+.env
+**/.env
+**/.env.*
+!**/.env.example
+**/node_modules
+**/dist
+**/venv
+**/.venv
+**/__pycache__
+**/*.py[cod]
+**/keys
+**/key
+**/*.pem
+**/*.eif
+**/.DS_Store
+docs

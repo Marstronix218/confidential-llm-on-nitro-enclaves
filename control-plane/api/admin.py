@@ -2,13 +2,15 @@ from flask import Flask, render_template, jsonify
 import boto3 
 from botocore.config import Config
 import time
-import threading
 import psutil
 import os
 import signal
 import sys
+import shlex
 import subprocess
 import json
+import requests
+from auth import require_basic
 
 
 def env_list(name):
@@ -30,6 +32,9 @@ DATA_PLANE_VENV      = os.environ.get("DATA_PLANE_VENV", "/home/ec2-user/venv")
 ENCLAVE_EIF_PATH     = os.environ.get("ENCLAVE_EIF_PATH", f"{DATA_PLANE_REPO_DIR}/enclave/llm.eif")
 ENCLAVE_DEBUG_MODE   = os.environ.get("ENCLAVE_DEBUG_MODE", "true").lower() == "true"
 DEMO_URL             = os.environ.get("DEMO_URL", "http://localhost:8080")
+DATA_PLANE_TOKEN     = os.environ.get("DATA_PLANE_TOKEN", "")   # bearer token for vsock_api_server.py
+CHAT_HEALTH_URL      = "http://localhost:8501/health"           # chat.py started by start_demo
+WEB_DEV_URL          = "http://localhost:8080"                  # React dev server (vite.config.ts)
 
 API_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(API_DIR, "..", "web")
@@ -103,6 +108,7 @@ session = boto3.Session()
 ssm_client = boto3.client('ssm', config = config)
 
 app = Flask(__name__)
+app.before_request(require_basic("ADMIN_USER", "ADMIN_PASSWORD"))
 
 # In-process state
 instance_created = False
@@ -111,7 +117,36 @@ tee_status = False
 demo_status = False
 demo_url = None
 react_process = None
+chat_process = None
 key_id = None
+
+
+def wait_for_ssm_command(command_id, instance_id, timeout):
+    """Poll an SSM command until it leaves Pending/InProgress; return the invocation."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            invocation = ssm_client.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+            if invocation['Status'] not in ('Pending', 'InProgress', 'Delayed'):
+                return invocation
+        except ssm_client.exceptions.InvocationDoesNotExist:
+            pass  # not registered yet right after send_command
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"SSM command {command_id} did not finish within {timeout}s")
+        time.sleep(0.5)
+
+
+def wait_for_http(url, timeout):
+    """Poll url until it answers 200; return False if it does not within timeout seconds."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if requests.get(url, timeout=2).status_code == 200:
+                return True
+        except requests.RequestException:
+            pass
+        time.sleep(0.5)
+    return False
 
 def stop_process_by_name(name_substring):
     """Stop any process whose name or command line contains the substring."""
@@ -186,13 +221,16 @@ def create_instance():
 
 
 # Return the data-plane public IP
+def dataplane_public_ip():
+    instance_id = data_plane_instances[0]
+    ec2_response = ec2.describe_instances(InstanceIds=[instance_id])
+    return ec2_response['Reservations'][0]['Instances'][0]['PublicIpAddress']
+
+
 @app.route('/api/dataplane/ip')
 def get_dataplane_ip():
     try:
-        instance_id = data_plane_instances[0]
-        ec2_response = ec2.describe_instances(InstanceIds=[instance_id])
-        public_ip = ec2_response['Reservations'][0]['Instances'][0]['PublicIpAddress']
-        return jsonify({'ip': public_ip})
+        return jsonify({'ip': dataplane_public_ip()})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -275,7 +313,7 @@ def stop_tee():
         command_id = response['Command']['CommandId']
         print(f"Nitro-enclave termination command sent. Command ID: {command_id}")
         
-        resp = kms.schedule_key_deletion(
+        kms.schedule_key_deletion(
             KeyId=key_id,
             PendingWindowInDays=7
         )
@@ -295,12 +333,7 @@ def tee_ready_status():
             DocumentName='AWS-RunShellScript',
             Parameters={'commands': ['sudo nitro-cli describe-enclaves']}
         )
-        # Give SSM a moment to run the command
-        time.sleep(1)
-        output = ssm_client.get_command_invocation(
-            CommandId=response['Command']['CommandId'],
-            InstanceId=data_plane_instances[0]
-        )
+        output = wait_for_ssm_command(response['Command']['CommandId'], data_plane_instances[0], timeout=30)
         # Check whether the output reports a running enclave
         if "RUNNING" in output.get('StandardOutputContent', ''):
             return jsonify({"ready": True})
@@ -329,49 +362,54 @@ def start_demo():
         }), 400
 
     try:
-        import chat
-        # Start the HTTP->vsock bridge on the data plane
+        # Start the HTTP->vsock bridge on the data plane (long-running, so wait for /health instead
+        # of the SSM command). ENCLAVE_LOG_PLAINTEXT is deliberately never set here.
+        token_env = f'DATA_PLANE_TOKEN={shlex.quote(DATA_PLANE_TOKEN)} ' if DATA_PLANE_TOKEN else ''
         response = ssm_client.send_command(
             InstanceIds=data_plane_instances,
             DocumentName='AWS-RunShellScript',
             Parameters={
                 'commands': [
                     f'source {DATA_PLANE_VENV}/bin/activate',
-                    f'python3 {DATA_PLANE_REPO_DIR}/data-plane/vsock_api_server.py'
+                    f'{token_env}python3 {DATA_PLANE_REPO_DIR}/data-plane/vsock_api_server.py'
                 ]
             }
         )
         command_id = response['Command']['CommandId']
-        print(f"server_key_api.py command sent. Command ID: {command_id}")
+        print(f"vsock_api_server.py command sent. Command ID: {command_id}")
 
         # Wait for vsock_api_server.py to come up
-        time.sleep(3)
+        data_plane_health = f"http://{dataplane_public_ip()}:5000/health"
+        if not wait_for_http(data_plane_health, timeout=60):
+            return jsonify({"success": False, "message": f"Data plane did not become ready ({data_plane_health})"})
 
-        # Start chat.py
-        chat_process = subprocess.Popen(
-            [sys.executable, os.path.join(API_DIR, "chat.py")]
-        )
-        print("Running app.py at port 8501")
-        
-        time.sleep(3)
+        # Start chat.py (inherits this environment: API_TOKEN, DATA_PLANE_TOKEN, ADMIN_USER, ...)
+        if chat_process is None or chat_process.poll() is not None:
+            chat_process = subprocess.Popen(
+                [sys.executable, os.path.join(API_DIR, "chat.py")]
+            )
+            print("Running chat.py at port 8501")
+        if not wait_for_http(CHAT_HEALTH_URL, timeout=30):
+            return jsonify({"success": False, "message": "chat.py did not become ready on port 8501"})
         
         # Start the React app
         if react_process is None:
             react_process = subprocess.Popen(
                 ["npm", "run", "dev"],
                 cwd=WEB_DIR,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stdout=subprocess.DEVNULL,   # never read: a full pipe would block Vite
+                stderr=subprocess.DEVNULL
             )
             print("React app started on port 8080")
         else:
             print("React app already running")
         
+        # Wait for the React dev server
+        if not wait_for_http(WEB_DEV_URL, timeout=60):
+            return jsonify({"success": False, "message": f"React dev server did not become ready ({WEB_DEV_URL})"})
+
         demo_status = True
         demo_url = DEMO_URL
-        
-        # Wait for chat.py to come up
-        time.sleep(3)
         
         return jsonify({
             "success": True,
@@ -416,8 +454,6 @@ def stop_demo():
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
-    global demo_status, demo_url
-
     # Fetch the EC2 instance state
     instance_status = "stopped"
     if data_plane_instances:

@@ -6,50 +6,100 @@
 #   docker compose up --build      # first build downloads CPU torch + Qwen2.5-0.5B-Instruct (a few minutes)
 #   ENCLAVE_MODEL=distilgpt2 docker compose up --build   # original GPT-2 instead
 #   open http://localhost:8080
-#   python scripts/smoke_test.py   # or drive the whole flow from the CLI
+#   API_TOKEN=local-api-token python scripts/smoke_test.py   # or drive the whole flow from the CLI
+#
+# Every image is built with the repo root as context, so each one can copy common/utils.py.
+# Startup order is enforced by health checks: enclave (model loaded, port 5000 open)
+# -> data-plane (/health) -> chat (/health) -> web.
+# The tokens below are demo defaults; set API_TOKEN / DATA_PLANE_TOKEN in the shell or .env to override.
 
 services:
   enclave:
     build:
-      context: ./enclave
-      dockerfile: Dockerfile.local
+      context: .
+      dockerfile: enclave/Dockerfile.local
       args:
         # Any Hugging Face causal LM. Examples: Qwen/Qwen2.5-0.5B-Instruct (default), distilgpt2, gpt2
         MODEL_ID: ${ENCLAVE_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}
     environment:
       MAX_NEW_TOKENS: ${MAX_NEW_TOKENS:-150}
+      # LOCAL DEMO ONLY: print decrypted prompts and answers so `docker compose logs enclave`
+      # shows the decryption happening. The real Nitro enclave never sets this (default false).
+      ENCLAVE_LOG_PLAINTEXT: "true"
+    healthcheck:
+      # Ready once the model is loaded and the server accepts connections on port 5000
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 5000), 2).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 600s
+      start_interval: 2s
     # not published: only the data plane may talk to the enclave, as with vsock
 
   data-plane:
-    build: ./data-plane
+    build:
+      context: .
+      dockerfile: data-plane/Dockerfile
     environment:
       ENCLAVE_TRANSPORT: tcp
       ENCLAVE_HOST: enclave
+      # Shared secret with chat.py: every route except /health requires "Authorization: Bearer <token>"
+      DATA_PLANE_TOKEN: ${DATA_PLANE_TOKEN:-local-data-plane-token}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
     depends_on:
-      - enclave
+      enclave:
+        condition: service_healthy
     # not published: the control plane reaches it on the compose network
 
   chat:
-    build: ./control-plane/api
+    build:
+      context: .
+      dockerfile: control-plane/api/Dockerfile
     environment:
       DATA_PLANE_URL: http://data-plane:5000
+      DATA_PLANE_TOKEN: ${DATA_PLANE_TOKEN:-local-data-plane-token}
+      # Browser -> chat.py bearer token; the web service sends the same value as VITE_API_TOKEN
+      API_TOKEN: ${API_TOKEN:-local-api-token}
+      ALLOWED_ORIGINS: http://localhost:8080
+      # No Nitro hardware locally, so there is no attestation document to verify
+      REQUIRE_ATTESTATION: "false"
+      ENCLAVE_DEBUG_MODE: "true"
       KEY_DIRECTORY: /data/keys
       TEE_TIMEOUT: "180"
     volumes:
       - keys:/data
     ports:
       - "8501:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
     depends_on:
-      - data-plane
+      data-plane:
+        condition: service_healthy
 
   web:
-    build: ./control-plane/web
+    build:
+      context: .
+      dockerfile: control-plane/web/Dockerfile
     environment:
-      VITE_API_BASE_URL: http://localhost:8501/api   # used by the browser, so localhost is correct
+      # Read by the Vite dev server at container start and used by the browser, so localhost is correct
+      VITE_API_BASE_URL: http://localhost:8501/api
+      VITE_API_TOKEN: ${API_TOKEN:-local-api-token}
     ports:
       - "8080:8080"
     depends_on:
-      - chat
+      chat:
+        condition: service_healthy
 
 volumes:
   keys:

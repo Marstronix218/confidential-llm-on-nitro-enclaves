@@ -1,0 +1,2 @@
+# Test runner for the repo-wide pytest.ini (install alongside a component's requirements.txt)
+pytest==9.1.1

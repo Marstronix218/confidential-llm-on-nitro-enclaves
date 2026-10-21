@@ -3,10 +3,10 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "@/lib/toast";
-import { Send, RefreshCw, Lock } from "lucide-react";
+import { Send, RefreshCw, Lock, MessageSquarePlus } from "lucide-react";
 import ChatMessage from "./ChatMessage";
 import ProcessingStep from "./ProcessingStep";
-import { encryptAndSendPrompt } from "@/lib/api";
+import { encryptAndSendPrompt, ChatTurn } from "@/lib/api";
 import AnimatedContainer from "./AnimatedContainer";
 
 export interface Message {
@@ -30,14 +30,29 @@ const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({ readyT
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
+  // Conversation sent to the model: completed user/assistant turns only (no ciphertext, welcome or error messages)
+  const [history, setHistory] = useState<ChatTurn[]>([]);
+  // Bumped on every reset so replies still in flight for an old conversation are dropped
+  const conversationIdRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const clearConversation = () => {
+    conversationIdRef.current += 1;
+    setMessages([]);
+    setHistory([]);
+    setIsLoading(false);
+    setCurrentStep(0);
+  };
 
   // Expose the clearAllMessages method via ref
   useImperativeHandle(ref, () => ({
-    clearAllMessages: () => {
-      setMessages([]);
-    }
+    clearAllMessages: clearConversation
   }));
+
+  const handleNewConversation = () => {
+    clearConversation();
+    toast.success("Started a new conversation");
+  };
 
   // Add a welcome message when the component loads or messages are cleared
   useEffect(() => {
@@ -76,13 +91,19 @@ const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({ readyT
       timestamp: new Date()
     };
   
+    // Whole conversation so far plus the new message, so the model sees the context
+    const turns: ChatTurn[] = [...history, { role: "user", content: inputValue }];
+    const conversationId = conversationIdRef.current;
+    const isCurrent = () => conversationIdRef.current === conversationId;
+
     setMessages((prev) => [...prev, userMessage]);
     setInputValue("");
     setIsLoading(true);
     setCurrentStep(1); // Step 1: show encryption in progress
   
     try {
-      const response = await encryptAndSendPrompt(inputValue);
+      const response = await encryptAndSendPrompt(turns);
+      if (!isCurrent()) return;
   
       // Step 2: show the encrypted prompt
       const encryptedPromptMessage: Message = {
@@ -96,15 +117,19 @@ const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({ readyT
   
       // Advance through the remaining steps with short delays for the visualization
       setTimeout(() => {
+        if (!isCurrent()) return;
         setCurrentStep(2); // Step 2: send prompt to the enclave
   
         setTimeout(() => {
+          if (!isCurrent()) return;
           setCurrentStep(3); // Step 3: decrypt inside the enclave
   
           setTimeout(() => {
+            if (!isCurrent()) return;
             setCurrentStep(4); // Step 4: generate response inside the enclave
   
             setTimeout(() => {
+              if (!isCurrent()) return;
               setCurrentStep(5); // Step 5: encrypt response with key B
 
               // Step 6: show the encrypted response
@@ -118,9 +143,11 @@ const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({ readyT
               setMessages((prev) => [...prev, encryptedResponseMessage]);
   
               setTimeout(() => {
+                if (!isCurrent()) return;
                 setCurrentStep(6); // Step 6: decrypt response with private key B
   
                 setTimeout(() => {
+                  if (!isCurrent()) return;
                   // Step 7: show the decrypted response
                   const assistantMessage: Message = {
                     role: "assistant",
@@ -129,6 +156,11 @@ const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({ readyT
                     simulated: !response.success
                   };
                   setMessages((prev) => [...prev, assistantMessage]);
+
+                  // Only completed exchanges become context for the next message
+                  if (response.success) {
+                    setHistory([...turns, { role: "assistant", content: response.decryptedResponse }]);
+                  }
     
                   if (!response.success) {
                     toast.error(response.message || "Failed to process the message");
@@ -149,6 +181,7 @@ const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({ readyT
       }, 1600);
   
     } catch (error) {
+      if (!isCurrent()) return;
       console.error("Error sending message:", error);
       const encryptedMessage: Message = {
         role: "encrypted",
@@ -180,11 +213,22 @@ const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({ readyT
 
   return (
     <div className="flex flex-col h-full">
-      <div className="p-4 border-b">
-        <h2 className="text-xl font-medium tracking-tight">Secure Chat</h2>
-        <p className="text-sm text-muted-foreground mt-1">
-          Encrypted end to end between you and the enclave
-        </p>
+      <div className="p-4 border-b flex items-start justify-between">
+        <div>
+          <h2 className="text-xl font-medium tracking-tight">Secure Chat</h2>
+          <p className="text-sm text-muted-foreground mt-1">
+            Encrypted end to end between you and the enclave
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleNewConversation}
+          disabled={isLoading}
+        >
+          <MessageSquarePlus className="h-4 w-4 mr-2" />
+          New conversation
+        </Button>
       </div>
 
       <div className="flex-1 overflow-hidden grid grid-cols-3 gap-4 p-4">

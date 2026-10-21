@@ -1,23 +1,26 @@
 # Local mock of the enclave for `docker compose up` (no Nitro hardware needed).
 # Runs the exact same vsock_server.py, but over TCP instead of vsock.
-# The real enclave image is built from ./Dockerfile with nitro-cli.
+# The real enclave image is built from enclave/Dockerfile with nitro-cli.
+# Build context: the repo root (docker-compose.yml sets it).
 #
 #   docker compose build                                   # Qwen2.5-0.5B-Instruct (default)
 #   ENCLAVE_MODEL=distilgpt2 docker compose build enclave  # switch back to the original GPT-2
-FROM python:3.11-slim
+# python:3.11.17-slim
+FROM python@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce
 
 ARG MODEL_ID=Qwen/Qwen2.5-0.5B-Instruct
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir 'transformers[torch]' pycryptodome
+# Same hash-locked dependencies as the real enclave image (enclave/requirements.in -> requirements.txt)
+COPY enclave/requirements.txt ./
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 # Download the model at build time so the container starts offline
-COPY download_model.py ./
+COPY enclave/download_model.py ./
 RUN python download_model.py "${MODEL_ID}" /app/model
 
-COPY vsock_server.py utils.py ./
+COPY enclave/vsock_server.py enclave/nsm.py common/utils.py ./
 
 ENV ENCLAVE_TRANSPORT=tcp \
     MODEL_DIR=/app/model \

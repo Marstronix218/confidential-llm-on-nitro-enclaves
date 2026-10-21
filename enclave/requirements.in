@@ -1,0 +1,16 @@
+# Direct dependencies of the enclave image. Do not install from this file: both enclave
+# Dockerfiles install the full hash-locked enclave/requirements.txt generated from it, so every
+# transitive dependency is pinned too and the image (and so PCR0) is reproducible.
+#
+# After editing, regenerate the lock on Linux x86_64 / Python 3.11 (the enclave platform), from the repo root:
+#   docker run --rm --platform linux/amd64 -v "$PWD/enclave":/w -w /w python:3.11.17-slim \
+#     sh -c 'pip install pip-tools==7.6.2 && pip-compile --generate-hashes --allow-unsafe \
+#       --extra-index-url https://download.pytorch.org/whl/cpu -o requirements.txt requirements.in'
+#
+# CPU-only torch: on Linux the PyTorch CPU index serves 2.14.1+cpu, which pip prefers over the CUDA build on PyPI.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.14.1
+transformers[torch]==5.20.2
+pycryptodome==4.1.0
+cbor2==6.1.5

@@ -1,31 +1,44 @@
 // import { toast } from "@/lib/toast";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8501/api";     // chat.py on the control plane
+const API_TOKEN = import.meta.env.VITE_API_TOKEN;   // must match API_TOKEN on chat.py when that is set
+
+// Headers sent on every request to chat.py
+function apiHeaders(extra?: HeadersInit): HeadersInit {
+  return {
+    'Content-Type': 'application/json',
+    ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
+    ...extra,
+  };
+}
 
 // Base API request function
 async function fetchApi(endpoint: string, options: RequestInit = {}) {
   try {
     const response = await fetch(`${API_BASE_URL}/${endpoint}`, {
       ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...options.headers,
-      },
+      headers: apiHeaders(options.headers),
     });
 
     if (!response.ok) {
+      let message = `Error: ${response.status} ${response.statusText}`;
       try {
         const errorData = await response.json();
-        throw new Error(errorData.message || `Error: ${response.status}`);
-      } catch (jsonError) {
-        // If JSON parsing fails, use status text
-        throw new Error(`Error: ${response.status} ${response.statusText}`);
+        if (errorData.message) message = errorData.message;
+      } catch {
+        // Not JSON, keep the status text
       }
+      throw new Error(message);
     }
 
     // Safely parse JSON - handle empty responses
     const text = await response.text();
-    return text ? JSON.parse(text) : {};
+    const data = text ? JSON.parse(text) : {};
+    // Some chat.py errors come back with HTTP 200 and an error body
+    if (data.status === "error" || data.success === false) {
+      throw new Error(data.message || "Request failed");
+    }
+    return data;
   } catch (error) {
     console.error(`API Error (${endpoint}):`, error);
     throw error;
@@ -43,11 +56,22 @@ export async function createKeyDirectory() {
   }
 }
 
+// Result of verifying the enclave's attestation document (see chat.py /api/retrieve_server_key)
+export interface Attestation {
+  verified: boolean;      // only true for mode "verified": a valid document with the expected, real PCRs
+  chain_valid: boolean;   // signature, certificate chain to the AWS root, nonce and key X check out
+  pcr0: string | null;
+  pcr1: string | null;
+  pcr2: string | null;
+  mode: "verified" | "skipped" | "debug" | "failed";
+  errors?: string[];      // present when a document was checked and failed (mode "failed")
+}
+
 // Server Key Retrieval
-export async function retrieveServerKey() {
+export async function retrieveServerKey(): Promise<{ success: boolean; message: string; attestation?: Attestation }> {
   try {
     const result = await fetchApi('retrieve_server_key');
-    return { success: true, message: result.message };
+    return { success: true, message: result.message, attestation: result.attestation };
   } catch (error) {
     console.error("Failed to retrieve server key:", error);
     return { success: false, message: error instanceof Error ? error.message : "Unknown error" };
@@ -127,94 +151,70 @@ export async function deleteAllKeys() {
 }
 
 // Chat functions
-// Encrypt and send prompt to TEE, with both prompt and response in Base64 format
-export async function encryptAndSendPrompt(prompt: string) {
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+// POST a JSON body to chat.py and return the parsed response, throwing on HTTP errors
+async function postJson(endpoint: string, body: unknown, label: string) {
+  const res = await fetch(`${API_BASE_URL}/${endpoint}`, {
+    method: "POST",
+    headers: apiHeaders(),
+    body: JSON.stringify(body),
+  });
+
+  let data;
   try {
-    // Step 1: Encrypt prompt with Key A (public)
-    const encryptRes = await fetch(`${API_BASE_URL}/encrypt_prompt`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt }),
-    });
+    const text = await res.text();
+    data = text ? JSON.parse(text) : {};
+  } catch (e) {
+    console.error(`Failed to parse ${label} response:`, e);
+    throw new Error(`Invalid response from ${label} service`);
+  }
 
-    if (!encryptRes.ok) {
-      throw new Error(`Encryption error: ${encryptRes.status} ${encryptRes.statusText}`);
-    }
+  if (!res.ok || data.status === "error" || data.success === false) {
+    throw new Error(data.message || `${label} error: ${res.status} ${res.statusText}`);
+  }
+  return data;
+}
 
-    let encryptData;
-    try {
-      const text = await encryptRes.text();
-      encryptData = text ? JSON.parse(text) : {};
-    } catch (e) {
-      console.error("Failed to parse encryption response:", e);
-      throw new Error("Invalid response from encryption service");
-    }
-
-    if (!encryptData.success && !encryptData.encrypted_prompt) {
+// Encrypt the conversation with key A, run it in the enclave, decrypt the answer with key B.
+// `messages` is the whole conversation so far; the last element is the new user message.
+export async function encryptAndSendPrompt(messages: ChatTurn[]) {
+  try {
+    // Step 1: Encrypt the conversation with Key A (public)
+    const encryptData = await postJson("encrypt_prompt", { messages }, "Encryption");
+    const encryptedPrompt: string = encryptData.encrypted_prompt;
+    if (!encryptedPrompt) {
       throw new Error(encryptData.message || "Failed to encrypt prompt");
     }
 
-    const encryptedPrompt = encryptData.encrypted_prompt;
-
-    const generateRes = await fetch(`${API_BASE_URL}/generate_text`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ encrypted_prompt: encryptedPrompt }),
-    });
-
-    if (!generateRes.ok) {
-      throw new Error(`TEE error: ${generateRes.status} ${generateRes.statusText}`);
+    // Step 2: Run it inside the enclave; the answer comes back encrypted with Key B
+    const generateData = await postJson("generate_text", { encrypted_prompt: encryptedPrompt }, "TEE");
+    const encryptedResponse: string = generateData.encrypted_response;
+    if (!encryptedResponse) {
+      throw new Error(generateData.message || "No response from the enclave");
     }
 
-    let encryptedResponseBuffer;
-    try {
-      encryptedResponseBuffer = await generateRes.arrayBuffer(); // binary response
-    } catch (e) {
-      console.error("Failed to get response from TEE:", e);
-      throw new Error("Invalid response from TEE service");
-    }
-
-    const encryptedResponseBytes = new Uint8Array(encryptedResponseBuffer);
-    const encryptedResponseBase64 = btoa(String.fromCharCode(...encryptedResponseBytes));
-
-    // Step 3: Decrypt response
-    const decryptRes = await fetch(`${API_BASE_URL}/decrypt_response`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        encrypted_response: encryptedResponseBase64,
-      }),
-    });
-
-    if (!decryptRes.ok) {
-      throw new Error(`Decryption error: ${decryptRes.status} ${decryptRes.statusText}`);
-    }
-
-    let decryptData;
-    try {
-      const text = await decryptRes.text();
-      decryptData = text ? JSON.parse(text) : {};
-    } catch (e) {
-      console.error("Failed to parse decryption response:", e);
-      throw new Error("Invalid response from decryption service");
-    }
-
-    if (!decryptData.success && !decryptData.decrypted_response) {
+    // Step 3: Decrypt response with Key B (private)
+    const decryptData = await postJson("decrypt_response", { encrypted_response: encryptedResponse }, "Decryption");
+    if (typeof decryptData.decrypted_response !== "string") {
       throw new Error(decryptData.message || "Failed to decrypt response");
     }
 
     return {
       success: true,
-      encryptedPrompt: typeof encryptedPrompt === 'string' ? encryptedPrompt : JSON.stringify(encryptedPrompt),
-      encryptedResponse: encryptedResponseBase64,
-      decryptedResponse: decryptData.decrypted_response,
+      encryptedPrompt,
+      encryptedResponse,
+      decryptedResponse: decryptData.decrypted_response as string,
     };
 
-  } catch (err: any) {
+  } catch (err) {
     console.error("Chat processing error:", err);
     return {
       success: false,
-      message: err.message || "Failed to process message",
+      message: err instanceof Error ? err.message : "Failed to process message",
       encryptedPrompt: "N/A",
       encryptedResponse: "N/A",
       decryptedResponse: "I'm sorry, I couldn't process your message due to a connection issue. Please try again or check your network connection.",

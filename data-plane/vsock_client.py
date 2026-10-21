@@ -2,17 +2,19 @@
 # // SPDX-License-Identifier: MIT-0
 
 #!/usr/local/bin/env python3
-import argparse
 import json
 import os
+import secrets
 import socket
-import struct
 import subprocess
+import sys
 from ast import literal_eval
 
-from Crypto.Cipher import PKCS1_OAEP
-from Crypto.Hash import SHA256
 from Crypto.PublicKey import RSA
+
+# utils.py lives in <repo>/common; the Docker images copy it next to this script instead.
+if not os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils.py")):
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
 
 import utils
 
@@ -62,11 +64,11 @@ def get_cid() -> str:
     return enclave_cid
 
 
-def send_request(method: str, data=b"") -> dict:
+def send_request(method: str, data=b"", session_id=None) -> dict:
     """
     Send request to the server
     There are four types of requests in this program.
-    1. get_server_pubkey
+    1. get_server_pubkey (data: optional nonce; creates a session)
     2. send_encrypted_client_seckey_a
     3. send_client_pubkey_b
     4. generate_text
@@ -75,27 +77,54 @@ def send_request(method: str, data=b"") -> dict:
     :type method: str, required
     :param data: content of the request
     :type data: bytes, default to b""
-    :return: dictionary representing response from the server.
-        The response will have two fields: status_code and data.
+    :param session_id: session returned by get_server_pubkey (methods 2-4)
+    :type session_id: str or None
+    :return: dictionary representing response from the server:
+        {"status_code": 0, "data": ...} or {"status_code": 1, "error": str}
     :rtype: dict
     """
     request = dict()
     request["method"] = method
+    if session_id is not None:
+        request["session_id"] = session_id
     request["data"] = data
     encoded_request = str(request).encode()
 
     client_sock = connect_to_server()
-    # Sends request and receives response
-    utils.send_data(client_sock, encoded_request)
+    if client_sock is None:
+        raise ConnectionError("Could not connect to the enclave")
 
-    response = utils.recv_data(client_sock).decode().rstrip()
-    client_sock.close()
+    try:
+        # Sends request and receives response
+        utils.send_data(client_sock, encoded_request)
+        response = utils.recv_data(client_sock)
+    finally:
+        client_sock.close()
 
-    return literal_eval(response)
+    if response is None:
+        raise ConnectionError("Enclave closed the connection without a response")
+
+    return literal_eval(response.decode().rstrip())
+
+
+def _check(response: dict) -> dict:
+    if response.get("status_code") != 0:
+        raise RuntimeError(f"Enclave error: {response.get('error')}")
+    return response
 
 
 def test():
-    server_pubkey = send_request("get_server_pubkey")["data"]
+    nonce = secrets.token_bytes(32)
+    session = _check(send_request("get_server_pubkey", nonce))["data"]
+    session_id = session["session_id"]
+    server_pubkey = session["pubkey"]
+    attestation = session["attestation"]
+    print(f"session_id: {session_id}")
+    print(
+        f"attestation document: {len(attestation)} bytes"
+        if attestation
+        else "attestation document: none (not running in a Nitro Enclave?)"
+    )
 
     # generate pubkey_a and seckey_a, then encrypt it with pubkey_x
     key_a = RSA.generate(utils.RSA_KEY_SIZE)
@@ -103,20 +132,22 @@ def test():
     pubkey_a = key_a.publickey().export_key()
 
     encrypted_seckey_a = utils.encrypt_by_chunk(seckey_a, server_pubkey)
-    send_request("send_encrypted_client_seckey_a", encrypted_seckey_a)
+    _check(send_request("send_encrypted_client_seckey_a", encrypted_seckey_a, session_id))
 
-    # generate seckey_b and pubkey_b
+    # generate seckey_b and pubkey_b, sign pubkey_b with seckey_a, then encrypt both with pubkey_x
     key_b = RSA.generate(utils.RSA_KEY_SIZE)
     seckey_b = key_b.export_key()
     pubkey_b = key_b.publickey().export_key()
 
-    send_request("send_client_pubkey_b", pubkey_b)
+    encrypted_pubkey_b = utils.encrypt_by_chunk(utils.sign_key_b(pubkey_b, seckey_a), server_pubkey)
+    _check(send_request("send_client_pubkey_b", encrypted_pubkey_b, session_id))
 
     text_prompt = "Hello."
     print(f"text prompt: {text_prompt}")
-    encrypted_text_prompt = utils.encrypt_by_chunk(text_prompt.encode(), pubkey_a)
+    payload = json.dumps({"messages": [{"role": "user", "content": text_prompt}]})
+    encrypted_text_prompt = utils.encrypt_by_chunk(payload.encode(), pubkey_a)
 
-    response = send_request("generate_text", encrypted_text_prompt)
+    response = _check(send_request("generate_text", encrypted_text_prompt, session_id))
     encrypted_generated_text = response["data"]
     decrypted_generated_text = utils.decrypt_by_chunk(
         encrypted_generated_text, seckey_b

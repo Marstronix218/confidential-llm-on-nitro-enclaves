@@ -2,10 +2,12 @@ import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "@/lib/toast";
 import AnimatedContainer from "./AnimatedContainer";
 import { 
-  FolderPlus, Key, Upload, Trash2, Download, Send, RefreshCw, Check
+  FolderPlus, Key, Upload, Trash2, Download, Send, RefreshCw, Check,
+  ShieldCheck, ShieldAlert, Copy
 } from "lucide-react";
 import {
   createKeyDirectory,
@@ -15,8 +17,94 @@ import {
   encryptKeyA,
   sendEncryptedKeyA,
   deleteKey,
-  deleteAllKeys
+  deleteAllKeys,
+  Attestation
 } from "@/lib/api";
+
+// Explanation shown under the badge when the enclave key is not backed by a verified attestation
+const attestationNotes: Record<Attestation["mode"], string> = {
+  verified: "The enclave's attestation document was verified against the AWS Nitro root certificate and the expected PCRs.",
+  debug: "The enclave runs in debug mode: its console is visible and its PCRs are zero, so the code it runs is unproven.",
+  skipped: "No attestation document was checked (local mock or verification disabled). The enclave's identity is unproven.",
+  failed: "The attestation document failed verification; see errors.",
+};
+
+const shortPcr = (value: string) =>
+  value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-8)}` : value;
+
+const AttestationResult: React.FC<{ attestation: Attestation }> = ({ attestation }) => {
+  const copyPcr = async (name: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success(`${name} copied`);
+    } catch {
+      toast.error(`Could not copy ${name}`);
+    }
+  };
+
+  const pcrs: [string, string | null][] = [
+    ["PCR0", attestation.pcr0],
+    ["PCR1", attestation.pcr1],
+    ["PCR2", attestation.pcr2],
+  ];
+
+  return (
+    <div className="rounded-md border bg-white/60 p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-muted-foreground">Attestation</span>
+        {/* A debug enclave's document is signed and chain-valid, but its PCRs are zero, so it proves nothing about the code */}
+        {attestation.verified && attestation.mode === "verified" ? (
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+            <ShieldCheck className="h-3 w-3 mr-1" />
+            Verified
+          </span>
+        ) : (
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+            <ShieldAlert className="h-3 w-3 mr-1" />
+            {attestation.mode === "debug" ? "Debug enclave, not trustworthy" : "Not verified"}
+          </span>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {attestationNotes[attestation.mode] ?? attestationNotes.skipped}
+      </p>
+      {attestation.errors && attestation.errors.length > 0 && (
+        <ul className="list-disc pl-4 text-xs text-yellow-800 break-words">
+          {attestation.errors.map((error) => (
+            <li key={error}>{error}</li>
+          ))}
+        </ul>
+      )}
+      <div className="space-y-1">
+        {pcrs.map(([name, value]) => (
+          <div key={name} className="flex items-center text-xs">
+            <span className="w-10 text-muted-foreground">{name}</span>
+            {value ? (
+              <>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <code className="flex-1 font-mono truncate cursor-default">{shortPcr(value)}</code>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-xs break-all font-mono text-xs">{value}</TooltipContent>
+                </Tooltip>
+                <button
+                  type="button"
+                  className="ml-1 p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted"
+                  onClick={() => copyPcr(name, value)}
+                  aria-label={`Copy ${name}`}
+                >
+                  <Copy className="h-3 w-3" />
+                </button>
+              </>
+            ) : (
+              <span className="flex-1 text-muted-foreground">n/a</span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
 
 interface KeyManagementProps {
   onClearChat: () => void;
@@ -25,6 +113,7 @@ interface KeyManagementProps {
 const KeyManagement: React.FC<KeyManagementProps> = ({ onClearChat }) => {
   const [isKeyDirCreated, setIsKeyDirCreated] = useState(false);
   const [isServerKeyRetrieved, setIsServerKeyRetrieved] = useState(false);
+  const [attestation, setAttestation] = useState<Attestation | null>(null);
   const [isKeyAGenerated, setIsKeyAGenerated] = useState(false);
   const [isKeyBGenerated, setIsKeyBGenerated] = useState(false);
   const [isKeyAEncrypted, setIsKeyAEncrypted] = useState(false);
@@ -60,7 +149,12 @@ const KeyManagement: React.FC<KeyManagementProps> = ({ onClearChat }) => {
       const result = await retrieveServerKey();
       if (result.success) {
         setIsServerKeyRetrieved(true);
-        toast.success("Enclave public key retrieved");
+        setAttestation(result.attestation ?? null);
+        if (result.attestation && result.attestation.mode !== "verified") {
+          toast.warning("Enclave public key retrieved, but its attestation is not verified");
+        } else {
+          toast.success("Enclave public key retrieved");
+        }
       } else {
         toast.error(result.message);
       }
@@ -203,6 +297,7 @@ const KeyManagement: React.FC<KeyManagementProps> = ({ onClearChat }) => {
       if (result.success) {
         setIsKeyDirCreated(false);
         setIsServerKeyRetrieved(false);
+        setAttestation(null);
         setIsKeyAGenerated(false);
         setIsKeyBGenerated(false);
         setIsKeyAEncrypted(false);
@@ -277,6 +372,8 @@ const KeyManagement: React.FC<KeyManagementProps> = ({ onClearChat }) => {
                 ) : null}
                 Get enclave public key
               </Button>
+
+              {attestation && <AttestationResult attestation={attestation} />}
             </div>
           </div>
         </AnimatedContainer>
@@ -357,7 +454,7 @@ const KeyManagement: React.FC<KeyManagementProps> = ({ onClearChat }) => {
                       size="sm"
                       className="w-full justify-start text-destructive hover:text-destructive"
                       onClick={handleDeleteKeyA}
-                      disabled={!isKeyAGenerated || isLoading}
+                      disabled={!isKeyAGenerated || isKeyASent || isLoading}   // keys are write-once per enclave session; after sending, start over with "Delete all keys"
                     >
                       <Trash2 className="h-4 w-4 mr-2" />
                       {isLoading && loadingAction === "Deleting key A" ? (
@@ -412,7 +509,7 @@ const KeyManagement: React.FC<KeyManagementProps> = ({ onClearChat }) => {
                       size="sm"
                       className="w-full justify-start"
                       onClick={handleSendKeyB}
-                      disabled={!isKeyBGenerated || isKeyBSent || isLoading}
+                      disabled={!isKeyBGenerated || !isKeyASent || isKeyBSent || isLoading}   // the enclave needs A before it can verify B's signature
                     >
                       {isKeyBSent ? (
                         <Check className="h-4 w-4 mr-2 text-green-500" />

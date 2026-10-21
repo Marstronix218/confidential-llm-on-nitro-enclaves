@@ -141,8 +141,11 @@
   </div>
 
   <script>
+    // admin.py rejects POSTs without this header (CSRF protection, see auth.py)
+    const XHR_HEADERS = { 'X-Requested-With': 'XMLHttpRequest' };
+
     function updateStatus() {
-      fetch('/api/status')
+      fetch('/api/status', { headers: XHR_HEADERS })
         .then(response => response.json())
         .then(data => {
           // Data plane create/terminate
@@ -186,7 +189,7 @@
     }
 
     function controlInstance(action) {
-      fetch(`/api/instance/${action}`, { method: 'POST' })
+      fetch(`/api/instance/${action}`, { method: 'POST', headers: XHR_HEADERS })
         .then(response => response.json())
         .then(data => {
           if (!data.success) alert(data.message);
@@ -195,7 +198,7 @@
     }
 
     function controlTEE(action) {
-      fetch(`/api/tee/${action}`, { method: 'POST' })
+      fetch(`/api/tee/${action}`, { method: 'POST', headers: XHR_HEADERS })
         .then(response => response.json())
         .then(data => {
           if (!data.success) alert(data.message);
@@ -206,7 +209,7 @@
     function controlDemo(action) {
       if (action === 'start') {
         // Check the enclave is ready before starting the demo
-        fetch('/api/tee/status')
+        fetch('/api/tee/status', { headers: XHR_HEADERS })
           .then(response => response.json())
           .then(data => {
             if (!data.ready) {
@@ -223,7 +226,7 @@
     }
 
     function proceedDemoStart() {
-      fetch('/api/demo/start', { method: 'POST' })
+      fetch('/api/demo/start', { method: 'POST', headers: XHR_HEADERS })
         .then(response => response.json())
         .then(data => {
           if (!data.success) {
@@ -235,7 +238,7 @@
     }
 
     function proceedDemoStop() {
-      fetch('/api/stop_demo', { method: 'POST' })
+      fetch('/api/stop_demo', { method: 'POST', headers: XHR_HEADERS })
         .then(response => response.json())
         .then(data => {
           if (!(data.chat_stopped || data.react_stopped)) {
@@ -248,7 +251,7 @@
 
     function createDataPlane() {
       if (confirm('Create the data-plane instance?')) {
-        fetch('/api/instance/create', { method: 'POST' })
+        fetch('/api/instance/create', { method: 'POST', headers: XHR_HEADERS })
           .then(response => response.json())
           .then(data => {
             if (data.success) {
@@ -263,7 +266,7 @@
 
     function deleteDataPlane() {
       if (confirm('Terminate the data-plane instance? This cannot be undone.')) {
-        fetch('/api/instance/delete', { method: 'POST' })
+        fetch('/api/instance/delete', { method: 'POST', headers: XHR_HEADERS })
           .then(response => response.json())
           .then(data => {
             if (data.success) {
